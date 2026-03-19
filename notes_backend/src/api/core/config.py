@@ -8,7 +8,8 @@ so deployment can inject the correct values without code changes.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,10 @@ class Settings:
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     access_token_exp_minutes: int = 60 * 24 * 7  # 7 days by default
+    allowed_origins: list[str] = field(default_factory=lambda: ["*"])
+    allowed_headers: list[str] = field(default_factory=lambda: ["*"])
+    allowed_methods: list[str] = field(default_factory=lambda: ["*"])
+    cors_max_age: int = 3600
 
 
 def _require_env(name: str) -> str:
@@ -38,15 +43,51 @@ def _require_env(name: str) -> str:
 
 
 # PUBLIC_INTERFACE
+def build_postgres_url_from_parts() -> str:
+    """Build a postgres URL from POSTGRES_* environment variables.
+
+    This supports deployments where the orchestrator provides split DB vars
+    (POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB/POSTGRES_PORT) instead of a full URL.
+
+    Returns:
+        str: SQLAlchemy-compatible PostgreSQL URL.
+    """
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    db = os.getenv("POSTGRES_DB")
+    port = os.getenv("POSTGRES_PORT")
+    host = os.getenv("POSTGRES_HOST", "localhost")
+
+    missing = [k for k, v in [("POSTGRES_USER", user), ("POSTGRES_PASSWORD", password), ("POSTGRES_DB", db), ("POSTGRES_PORT", port)] if not v]
+    if missing:
+        raise ValueError(
+            "Missing required database environment variables. "
+            "Provide POSTGRES_URL or all of: POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT. "
+            f"Missing: {', '.join(missing)}"
+        )
+
+    # NOTE: Avoid logging/printing this value because it contains credentials.
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+
+def _csv_env(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    parts = [p.strip() for p in raw.split(",")]
+    return [p for p in parts if p]
+
+
+# PUBLIC_INTERFACE
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Get application Settings.
 
     Returns:
         Settings: Resolved configuration.
     """
-    # We prefer POSTGRES_URL because it fully specifies host/port/db.
-    # The orchestrator for the database container is expected to provide it.
-    postgres_url = _require_env("POSTGRES_URL")
+    # Prefer POSTGRES_URL when provided; else build from split POSTGRES_* vars.
+    postgres_url = os.getenv("POSTGRES_URL") or build_postgres_url_from_parts()
 
     # JWT secret is required in any environment (including dev) to avoid insecure defaults.
     jwt_secret_key = _require_env("JWT_SECRET_KEY")
@@ -67,4 +108,8 @@ def get_settings() -> Settings:
         jwt_secret_key=jwt_secret_key,
         jwt_algorithm=jwt_algorithm,
         access_token_exp_minutes=exp_minutes,
+        allowed_origins=_csv_env("ALLOWED_ORIGINS", ["*"]),
+        allowed_headers=_csv_env("ALLOWED_HEADERS", ["*"]),
+        allowed_methods=_csv_env("ALLOWED_METHODS", ["*"]),
+        cors_max_age=int(os.getenv("CORS_MAX_AGE", "3600") or "3600"),
     )
