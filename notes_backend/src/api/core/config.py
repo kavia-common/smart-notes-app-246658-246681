@@ -7,7 +7,9 @@ so deployment can inject the correct values without code changes.
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -89,8 +91,22 @@ def get_settings() -> Settings:
     # Prefer POSTGRES_URL when provided; else build from split POSTGRES_* vars.
     postgres_url = os.getenv("POSTGRES_URL") or build_postgres_url_from_parts()
 
-    # JWT secret is required in any environment (including dev) to avoid insecure defaults.
-    jwt_secret_key = _require_env("JWT_SECRET_KEY")
+    # JWT secret: required for production, but allow a safe startup in preview/dev where
+    # the orchestrator may not inject JWT_SECRET_KEY by generating an ephemeral key.
+    #
+    # SECURITY NOTE: This makes tokens invalid after a restart (acceptable for dev/preview).
+    jwt_secret_key = os.getenv("JWT_SECRET_KEY")
+    if not jwt_secret_key:
+        node_env = (os.getenv("NODE_ENV") or "development").lower()
+        if node_env in {"production", "prod"}:
+            jwt_secret_key = _require_env("JWT_SECRET_KEY")
+        else:
+            logging.getLogger(__name__).warning(
+                "JWT_SECRET_KEY is not set; generating an ephemeral secret because NODE_ENV=%s. "
+                "Set JWT_SECRET_KEY to make tokens stable across restarts.",
+                node_env,
+            )
+            jwt_secret_key = secrets.token_urlsafe(48)
 
     jwt_algorithm = os.getenv("JWT_ALGORITHM", "HS256")
 

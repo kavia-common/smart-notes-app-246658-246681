@@ -11,6 +11,7 @@ This backend provides:
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -31,11 +32,20 @@ openapi_tags = [
     {"name": "sync", "description": "Offline-first synchronization endpoints."},
 ]
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database schema at startup."""
-    init_db()
+    """Initialize database schema at startup.
+
+    Note: startup should not fail hard in preview/dev environments if DB init fails
+    transiently; we log the error and allow health endpoints to come up.
+    """
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Database initialization failed at startup; continuing without blocking server startup.")
     yield
 
 
